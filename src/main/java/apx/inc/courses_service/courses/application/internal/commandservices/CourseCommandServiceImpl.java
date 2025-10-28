@@ -1,12 +1,12 @@
 package apx.inc.courses_service.courses.application.internal.commandservices;
 
+import apx.inc.courses_service.courses.application.internal.services.external.AssignmentApiService;
+import apx.inc.courses_service.courses.application.internal.services.external.IamApiService;
 import apx.inc.courses_service.courses.domain.model.aggregates.Course;
 import apx.inc.courses_service.courses.domain.model.commands.*;
 import apx.inc.courses_service.courses.domain.model.valueobjects.CourseJoinCode;
 import apx.inc.courses_service.courses.domain.services.CourseCommandService;
 import apx.inc.courses_service.courses.infrastructure.persistence.jpa.repositories.CourseRepository;
-import apx.inc.courses_service.courses.infrastructure.rest.clients.IamServiceClient;
-import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
 
 import java.util.Date;
@@ -16,23 +16,24 @@ import java.util.Optional;
 public class CourseCommandServiceImpl implements CourseCommandService {
 
     private final CourseRepository courseRepository;
-    private final IamServiceClient iamServiceClient;
+    private final IamApiService iamApiService;
+    private final AssignmentApiService assignmentApiService;
 
-    public CourseCommandServiceImpl(CourseRepository courseRepository, IamServiceClient iamServiceClient) {
+    public CourseCommandServiceImpl(CourseRepository courseRepository, IamApiService iamApiService, AssignmentApiService assignmentApiService, AssignmentApiService assignmentApiService1) {
         this.courseRepository = courseRepository;
-        this.iamServiceClient = iamServiceClient;
+        this.iamApiService = iamApiService;
+        this.assignmentApiService = assignmentApiService1;
     }
 
     @Override
-    public Long handle(CreateCourseCommand createCourseCommand) {
-        // ✅ USAR endpoints disponibles
-        Boolean teacherExists = iamServiceClient.userExists(createCourseCommand.teacherId());
-        if (Boolean.FALSE.equals(teacherExists)) {
-            throw new IllegalArgumentException("Teacher not found");
+    public Long handle(CreateCourseCommand createCourseCommand) { // ✅ QUITA el authHeader
+        // 1. Asegurarnos que el usuario que creo el curso exista
+        if (!iamApiService.userExists(createCourseCommand.teacherId())) { // ✅ LLAMADA AUTOMÁTICA
+            throw new IllegalArgumentException("Teacher with ID " + createCourseCommand.teacherId() + " not found");
         }
 
-        Boolean isTeacher = iamServiceClient.userHasRole(createCourseCommand.teacherId(), "ROLE_TEACHER");
-        if (Boolean.FALSE.equals(isTeacher)) {
+        // 2. Verificamos que tenga el rol de teacher
+        if (!iamApiService.isTeacher(createCourseCommand.teacherId())) { // ✅ LLAMADA AUTOMÁTICA
             throw new IllegalArgumentException("Only teachers can create courses");
         }
 
@@ -43,12 +44,34 @@ public class CourseCommandServiceImpl implements CourseCommandService {
 
     @Override
     public void handle(DeleteCourseCommand deleteCourseCommand) {
-        if (!courseRepository.existsById(deleteCourseCommand.courseId())) {
-            throw new IllegalArgumentException("Course not found");
+        var course = courseRepository.findById(deleteCourseCommand.courseId())
+                .orElseThrow(() -> new IllegalArgumentException("Course with ID " + deleteCourseCommand.courseId() + " not found"));
+
+        // ✅ 1. ELIMINAR TODOS LOS ASSIGNMENTS DEL CURSO
+        try {
+            boolean success = assignmentApiService.deleteAssignmentsByCourseId(deleteCourseCommand.courseId());
+            if (success) {
+                System.out.println("✅ Assignments eliminados del curso: " + deleteCourseCommand.courseId());
+            } else {
+                System.out.println("⚠️ No se pudieron eliminar algunos assignments");
+            }
+        } catch (Exception e) {
+            System.out.println("❌ Error eliminando assignments: " + e.getMessage());
         }
 
-        // ✅ SOLUCIÓN: Solo eliminar curso, no limpiar usuarios (eso lo hará IAM Service)
+        // ✅ 2. NOTIFICAR A IAM (igual que antes)
+        for (Long studentId : course.getStudentIds()) {
+            try {
+                iamApiService.removeCourseFromUser(studentId, course.getId());
+                System.out.println("✅ Notificado a IAM: estudiante " + studentId + " removido del curso " + course.getId());
+            } catch (Exception e) {
+                System.out.println("⚠️ No se pudo notificar a IAM para estudiante " + studentId + ": " + e.getMessage());
+            }
+        }
+
+        // ✅ 3. ELIMINAR EL CURSO
         courseRepository.deleteById(deleteCourseCommand.courseId());
+        System.out.println("✅ Curso eliminado completamente: " + deleteCourseCommand.courseId());
     }
 
     @Override
@@ -58,28 +81,25 @@ public class CourseCommandServiceImpl implements CourseCommandService {
                 .filter(c -> c.getCourseJoinCode() != null
                         && c.getCourseJoinCode().key().equals(command.joinCode()))
                 .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Course not found"));
+                .orElseThrow(() -> new IllegalArgumentException("Course with joinCode " + command.joinCode() + " not found"));
 
         // 2. Validar expiration
         if (course.getCourseJoinCode().expiration().before(new Date())) {
-            throw new IllegalArgumentException("Join code expired");
+            throw new IllegalArgumentException("Join code " + command.joinCode() + " has expired");
         }
 
-        // 3. Validar student (via IAM Service)
-        Boolean studentExists = iamServiceClient.userExists(command.studentId());
-        if (Boolean.FALSE.equals(studentExists)) {
-            throw new IllegalArgumentException("Student not found");
+        // 3. Validar que el student existe
+        if (!iamApiService.userExists(command.studentId())) { // ✅ LLAMADA AUTOMÁTICA
+            throw new IllegalArgumentException("User with ID " + command.studentId() + " not found");
         }
 
-        Boolean isStudent = iamServiceClient.userHasRole(command.studentId(), "ROLE_STUDENT");
-        if (Boolean.FALSE.equals(isStudent)) {
-            throw new IllegalArgumentException("Only students can join courses");
-        }
-
-        // 4. ✅ SOLUCIÓN: Inscribir estudiante en CURSO LOCAL (no en User)
+        // 4. Inscribir estudiante en CURSO LOCAL
         if (!course.hasStudent(command.studentId())) {
             course.enrollStudent(command.studentId());
             courseRepository.save(course);
+
+            // ✅ Notificar a IAM (AUTOMÁTICO)
+            iamApiService.assignCourseToUser(command.studentId(), course.getId()); // ✅ QUITA authHeader
         }
 
         return Optional.of(course);
@@ -88,97 +108,68 @@ public class CourseCommandServiceImpl implements CourseCommandService {
     @Override
     public void handle(KickStudentCommand command, Long teacherId) {
         var course = courseRepository.findById(command.courseId())
-                .orElseThrow(() -> new IllegalArgumentException("Course not found"));
+                .orElseThrow(() -> new IllegalArgumentException("Course with ID " + command.courseId() + " not found"));
 
         // Validar que teacher es owner
         if (!course.getTeacherId().equals(teacherId)) {
-            throw new IllegalArgumentException("Not course owner");
+            throw new IllegalArgumentException("Teacher with ID " + teacherId + " is not the owner of this course");
         }
 
         // Validar que student existe
-        Boolean studentExists = iamServiceClient.userExists(command.studentId());
-        if (Boolean.FALSE.equals(studentExists)) {
-            throw new IllegalArgumentException("Student not found");
+        if (!iamApiService.userExists(command.studentId())) { // ✅ LLAMADA AUTOMÁTICA
+            throw new IllegalArgumentException("Student with ID " + command.studentId() + " not found");
         }
 
-        // ✅ SOLUCIÓN: Expulsar estudiante del CURSO LOCAL
+        // Expulsar estudiante del CURSO LOCAL
         if (course.hasStudent(command.studentId())) {
             course.kickStudent(command.studentId());
             courseRepository.save(course);
+
+            // ✅ Notificar a IAM (AUTOMÁTICO)
+            iamApiService.removeCourseFromUser(command.studentId(), course.getId()); // ✅ QUITA authHeader
         }
     }
 
     @Override
     public Optional<Course> handle(ResetJoinCodeCommand resetJoinCodeCommand) {
-        //1. Verificar que el course existe
-
-        var optionalCourse=courseRepository.findById(resetJoinCodeCommand.courseId());
-
-        if (optionalCourse.isEmpty()) {
-            throw new IllegalArgumentException("Course with ID " + resetJoinCodeCommand.courseId() + " not found");
-        }
-
-        var course=optionalCourse.get();
-
-        //2. Resetear el joinCode
+        var course = courseRepository.findById(resetJoinCodeCommand.courseId())
+                .orElseThrow(() -> new IllegalArgumentException("Course with ID " + resetJoinCodeCommand.courseId() + " not found"));
 
         course.resetJoinCode();
-
-        //3. Guardar los cambios en elr epo
-
         courseRepository.save(course);
 
-        return  Optional.of(course);
+        return Optional.of(course);
     }
 
     @Override
     public Optional<CourseJoinCode> handle(SetJoinCodeCommand setJoinCodeCommand) {
-        //1. Verificar si existe el course
-        var optionalCourse=courseRepository.findById(setJoinCodeCommand.courseId());
+        var course = courseRepository.findById(setJoinCodeCommand.courseId())
+                .orElseThrow(() -> new IllegalArgumentException("Course with ID " + setJoinCodeCommand.courseId() + " not found"));
 
-        if (optionalCourse.isEmpty()) {
-            throw new IllegalArgumentException("Course with ID " + setJoinCodeCommand.courseId() + " not found");
-        }
-
-        var course=optionalCourse.get();
-
-
-        // 2. Verificar si el nuevo código ya está asignado a otro curso
-        var isAssigned = courseRepository.findAll().stream().anyMatch(c->c.getCourseJoinCode().key().equals(setJoinCodeCommand.keycode()));
+        // Verificar si el código ya está asignado a otro curso
+        boolean isAssigned = courseRepository.findAll().stream()
+                .anyMatch(c -> c.getCourseJoinCode() != null
+                        && c.getCourseJoinCode().key().equals(setJoinCodeCommand.keycode()));
 
         if (isAssigned) {
-            throw new IllegalArgumentException("Course with ID " + setJoinCodeCommand.courseId() + " is already assigned to any course");
+            throw new IllegalArgumentException("Join code " + setJoinCodeCommand.keycode() + " is already assigned to another course");
         }
 
-        //3.Actualizar el courseJoinCode
-        var updatedCourseJoinCode=new CourseJoinCode(setJoinCodeCommand.keycode(),setJoinCodeCommand.expiration());
-        var updatedCourse=course.setJoinCode(updatedCourseJoinCode);
-
-        //4. Actualizar el repositorio
+        var updatedCourseJoinCode = new CourseJoinCode(setJoinCodeCommand.keycode(), setJoinCodeCommand.expiration());
+        var updatedCourse = course.setJoinCode(updatedCourseJoinCode);
         courseRepository.save(updatedCourse);
 
         return Optional.of(updatedCourseJoinCode);
-
     }
 
     @Override
     public Optional<Course> handle(UpdateCourseCommand updateCourseCommand) {
-        //1. Verificar si existe el course
-        var optionalCourse=courseRepository.findById(updateCourseCommand.courseId());
+        var course = courseRepository.findById(updateCourseCommand.courseId())
+                .orElseThrow(() -> new IllegalArgumentException("Course with ID " + updateCourseCommand.courseId() + " not found"));
 
-        if (optionalCourse.isEmpty()) {
-            throw new IllegalArgumentException("Course with ID " + updateCourseCommand.courseId() + " not found");
-        }
-
-        var course=optionalCourse.get();
-
-        //2. Actualizar el course
-
-        var updatedCourse=course.updateCourse(updateCourseCommand);
-
-        //3. Guardamos en el repositorio
+        var updatedCourse = course.updateCourse(updateCourseCommand);
         courseRepository.save(updatedCourse);
 
-        return  Optional.of(updatedCourse);
+        return Optional.of(updatedCourse);
     }
 }

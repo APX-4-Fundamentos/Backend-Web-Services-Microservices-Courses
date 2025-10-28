@@ -1,62 +1,59 @@
 package apx.inc.courses_service.courses.infrastructure.authorization.sfs.services;
 
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
+
+import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
 
 @Service
 public class AuthenticationService {
 
-    @Value("${jwt.secret:WriteHereYourSecretStringForTokenSigningCredentials}")
+    @Value("${jwt.secret}")
     private String jwtSecret;
 
-    public Long getAuthenticatedUserId() {
-        var authentication = SecurityContextHolder.getContext().getAuthentication();
-
-        if (authentication == null || !authentication.isAuthenticated()) {
-            throw new RuntimeException("User not authenticated");
+    public Long getAuthenticatedUserId(String token) {
+        if (token == null || !token.startsWith("Bearer ")) {
+            throw new RuntimeException("Token not provided or invalid format");
         }
 
-        System.out.println("🔐 Authentication Principal Type: " + authentication.getPrincipal().getClass().getName());
+        // Quitar el prefijo Bearer
+        String jwtToken = token.substring(7);
 
-        // ✅ OPCIÓN A - Spring Security ya validó el JWT
-        if (authentication.getPrincipal() instanceof Jwt jwt) {
-            System.out.println("✅ JWT Claims: " + jwt.getClaims());
-            return extractUserIdFromJwt(jwt);
+        try {
+            SecretKey key = Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
+
+            Claims claims = Jwts.parser()
+                    .verifyWith(key)
+                    .build()
+                    .parseSignedClaims(jwtToken)
+                    .getPayload();
+
+            // Intentar obtener el user_id
+            Object userIdObj = claims.get("user_id");
+            if (userIdObj instanceof Number num) {
+                return num.longValue();
+            }
+
+            // Intentar con "sub"
+            String sub = claims.getSubject();
+            if (sub != null && sub.matches("\\d+")) {
+                return Long.parseLong(sub);
+            }
+
+            // Intentar con "username"
+            Object username = claims.get("username");
+            if (username != null && username.toString().matches("\\d+")) {
+                return Long.parseLong(username.toString());
+            }
+
+            throw new RuntimeException("User ID not found in token claims");
+
+        } catch (Exception e) {
+            throw new RuntimeException("Invalid JWT token: " + e.getMessage(), e);
         }
-
-        throw new RuntimeException("Cannot extract user ID from authentication. Principal type: " +
-                authentication.getPrincipal().getClass().getName());
-    }
-
-    private Long extractUserIdFromJwt(Jwt jwt) {
-        // 1. Intentar con user_id claim
-        Object userIdObj = jwt.getClaims().get("user_id");
-        Long userId = (userIdObj instanceof Number) ? ((Number) userIdObj).longValue() : null;
-        if (userId != null) {
-            System.out.println("✅ User ID from 'user_id' claim: " + userId);
-            return userId;
-        }
-
-        // 2. Intentar con sub (subject) claim
-        String subject = jwt.getSubject();
-        System.out.println("🔍 JWT Subject: " + subject);
-        if (subject != null && subject.matches("\\d+")) {
-            Long userIdFromSub = Long.parseLong(subject);
-            System.out.println("✅ User ID from 'sub' claim: " + userIdFromSub);
-            return userIdFromSub;
-        }
-
-        // 3. Fallback: username como número
-        String username = jwt.getClaimAsString("username");
-        System.out.println("🔍 JWT Username: " + username);
-        if (username != null && username.matches("\\d+")) {
-            Long userIdFromUsername = Long.parseLong(username);
-            System.out.println("✅ User ID from 'username' claim: " + userIdFromUsername);
-            return userIdFromUsername;
-        }
-
-        throw new RuntimeException("User ID not found in JWT token. Available claims: " + jwt.getClaims().keySet());
     }
 }

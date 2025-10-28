@@ -17,6 +17,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
@@ -37,53 +38,30 @@ public class CoursesController {
         this.authenticationService = authenticationService;
     }
 
-    private Long getAuthenticatedUserId() {
-        return authenticationService.getAuthenticatedUserId();  // ✅ USAR EL NUEVO SERVICIO
+    private Long getAuthenticatedUserId(HttpServletRequest request) {
+        String token = request.getHeader("Authorization");
+        return authenticationService.getAuthenticatedUserId(token);
     }
 
-//    private Long getAuthenticatedUserId() {
-//        var auth = SecurityContextHolder.getContext().getAuthentication();
-//        var principal = auth.getPrincipal();
-//        if (principal instanceof UserDetailsImpl userDetails) {
-//            System.out.println("🪪 Authenticated User ID: " + userDetails.getId());
-//            return userDetails.getId();
-//        }
-//        throw new RuntimeException("Invalid principal type");
-//    }
 
 
     @PostMapping
     @Operation(summary = "Create a Course", description = "Creates a course with the specified parameters")
-    @ApiResponses(
-            value = {
-                    @ApiResponse(responseCode = "201", description = "Course Created Successfully"),
-                    @ApiResponse(responseCode = "404", description = "Invalid input data")
-            }
-    )
-    public ResponseEntity<CourseResource> createCourse(@RequestBody CreateCourseResource resource) {
-        Long userId = getAuthenticatedUserId();
-
-        // 1️⃣ Convertir el recurso a comando
-        var createCommand = CreateCourseCommandFromResourceAssembler.toCommandFromResource(resource,userId);
-
-        //  2️⃣ Ejecutar el servicio
+    @ApiResponses({
+            @ApiResponse(responseCode = "201", description = "Course Created Successfully"),
+            @ApiResponse(responseCode = "404", description = "Invalid input data")
+    })
+    public ResponseEntity<CourseResource> createCourse(@RequestBody CreateCourseResource resource,
+                                                       HttpServletRequest request) { // ✅ AGREGAR ESTE PARÁMETRO
+        Long userId = getAuthenticatedUserId(request);
+        var createCommand = CreateCourseCommandFromResourceAssembler.toCommandFromResource(resource, userId);
         var createdId = courseCommandService.handle(createCommand);
+        if (createdId == null || createdId <= 0L) return ResponseEntity.badRequest().build();
 
-        // 3️⃣ Validar la creación
-        if (createdId == null || createdId <= 0L) {
-            return ResponseEntity.badRequest().build();
-        }
-
-        // 4️⃣  Recuperar el course creado
         var course = courseQueryService.handle(new GetCourseByIdQuery(createdId));
+        if (course.isEmpty()) return ResponseEntity.notFound().build();
 
-        if (course.isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
-
-        // 5️⃣ Devolver la respuesta
-        var courseEntity = course.get();
-        var courseResponse = CourseResourceFromEntityAssembler.toResourceFromEntity(courseEntity);
+        var courseResponse = CourseResourceFromEntityAssembler.toResourceFromEntity(course.get());
         return ResponseEntity.ok(courseResponse);
     }
 
@@ -95,31 +73,18 @@ public class CoursesController {
                     @ApiResponse(responseCode = "404", description = "Course with specified id does not exist")
             }
     )
-    public ResponseEntity<CourseResource> updateCourse(@RequestBody UpdateCourseResource resource, @PathVariable("id") Long id) {
-
-        Long userId = getAuthenticatedUserId();
-
-        // 1️⃣ Convertir el recurso a comando
-
+    public ResponseEntity<CourseResource> updateCourse(@RequestBody UpdateCourseResource resource,
+                                                       @PathVariable("id") Long id,
+                                                       HttpServletRequest request) {
+        Long userId = getAuthenticatedUserId(request);
         var updateCommand = UpdateCourseCommandFromResourceAssembler.toCommandFromResource(resource, id);
-
-        //  2️⃣ Ejecutar el servicio
-
         var updatedCourse = courseCommandService.handle(updateCommand);
+        if (updatedCourse.isEmpty()) return ResponseEntity.badRequest().build();
 
-        // 3️⃣ Validar la creación
-        if (updatedCourse.isEmpty()) {
-            return ResponseEntity.badRequest().build();
-        }
+        var course = courseQueryService.handle(new GetCourseByIdQuery(id));
+        if (course.isEmpty()) return ResponseEntity.notFound().build();
 
-        // 4️⃣  Recuperar el course creado
-        var getCourseByIdQuery = new GetCourseByIdQuery(id);
-        var course = courseQueryService.handle(getCourseByIdQuery);
-        if (course.isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
-        var courseEntity = course.get();
-        var courseResponse = CourseResourceFromEntityAssembler.toResourceFromEntity(courseEntity);
+        var courseResponse = CourseResourceFromEntityAssembler.toResourceFromEntity(course.get());
         return ResponseEntity.ok(courseResponse);
     }
 
@@ -148,10 +113,10 @@ public class CoursesController {
             @ApiResponse(responseCode = "404", description = "Course not found")
     })
     public ResponseEntity<CourseResource> joinCourse(
-            @PathVariable String key
+            @PathVariable String key,
+            HttpServletRequest request // ✅ Se añade para obtener el token del header
     ) {
-
-        Long userId = getAuthenticatedUserId();
+        Long userId = getAuthenticatedUserId(request); // ✅ Ahora se obtiene desde el token
 
         var joinByJoinCodeCommand = new JoinByJoinCodeCommand(userId, key);
         var groupOptional = courseCommandService.handle(joinByJoinCodeCommand);
@@ -175,12 +140,12 @@ public class CoursesController {
     )
     public ResponseEntity<?> kickStudentFromCourse(
             @PathVariable Long courseId,
-            @PathVariable Long studentId) {
-
-        Long teacherId = getAuthenticatedUserId(); // 👈 Id del profe logueado desde el JWT
+            @PathVariable Long studentId,
+            HttpServletRequest request // ✅ se añade aquí también
+    ) {
+        Long teacherId = getAuthenticatedUserId(request); // ✅ obtiene el id desde el token
 
         KickStudentCommand command = new KickStudentCommand(studentId, courseId);
-
         courseCommandService.handle(command, teacherId);
 
         return ResponseEntity.noContent().build(); // 204 No Content ✅
@@ -195,9 +160,23 @@ public class CoursesController {
                     @ApiResponse(responseCode = "404", description = "Course not found or course already has a join code")
             }
     )
-    public ResponseEntity<CourseJoinCodeResource> setCourseJoinCodeByGroupId(@PathVariable Long courseId, @RequestBody SetJoinCodeResource resource) {
+    public ResponseEntity<CourseJoinCodeResource> setCourseJoinCodeByGroupId(@PathVariable Long courseId,
+                                                                             @RequestBody SetJoinCodeResource resource,
+                                                                             HttpServletRequest request) { // ✅ AGREGAR ESTE PARÁMETRO
 
+        // ✅ NUEVO: Validar que el usuario es el teacher del curso
+        Long teacherId = getAuthenticatedUserId(request);
 
+        // Verificar que el curso existe y que el usuario es el teacher
+        var course = courseQueryService.handle(new GetCourseByIdQuery(courseId));
+        if (course.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        // Validar que el usuario autenticado es el teacher del curso
+        if (!course.get().getTeacherId().equals(teacherId)) {
+            return ResponseEntity.status(403).build(); // Forbidden
+        }
 
         // 3️⃣ Crear el comando
         var setCourseJoinCodeCommand =
@@ -230,7 +209,7 @@ public class CoursesController {
         var courses = courseQueryService.handle(getAllCoursesQuery);
 
         if (courses.isEmpty()) {
-            return ResponseEntity.notFound().build();
+            ResponseEntity.ok(List.of());
         }
 
         var courseResponse = courses.stream().map(CourseResourceFromEntityAssembler::toResourceFromEntity).toList();
@@ -263,26 +242,13 @@ public class CoursesController {
             @ApiResponse(responseCode = "200", description = "Courses retrieved successfully"),
             @ApiResponse(responseCode = "404", description = "Student not found or no courses found for student")
     })
-    public ResponseEntity<List<CourseResource>> getCoursesByStudentId() {
-
-        Long userId = getAuthenticatedUserId();
-
-        // Create the query to get courses by user ID
-        var getCoursesByStudentIdQuery = new GetCoursesByStudentIdQuery(userId);
-
-        // Execute the query using the courseQueryService
-        var courses = courseQueryService.handle(getCoursesByStudentIdQuery);
-
-        // Check if courses are found
-        if (courses.isEmpty()) {
-            return ResponseEntity.ok(List.of());
-        }
-
-        // Convert the list of courses to a list of GroupResource
-        var groupResponse = courses.stream()
-                .map(CourseResourceFromEntityAssembler::toResourceFromEntity)
-                .toList();
-        return ResponseEntity.ok(groupResponse);
+    public ResponseEntity<List<CourseResource>> getCoursesByStudentId(HttpServletRequest request) {
+        Long userId = getAuthenticatedUserId(request);
+        var query = new GetCoursesByStudentIdQuery(userId);
+        var courses = courseQueryService.handle(query);
+        if (courses.isEmpty()) return ResponseEntity.ok(List.of());
+        var response = courses.stream().map(CourseResourceFromEntityAssembler::toResourceFromEntity).toList();
+        return ResponseEntity.ok(response);
     }
 
     @GetMapping("/teacher")
@@ -300,26 +266,13 @@ public class CoursesController {
                     description = "Teacher not found or no courses found for teacher"
             )
     })
-    public ResponseEntity<List<CourseResource>> getCoursesByTeacherId() {
-        Long teacherId = getAuthenticatedUserId(); // 👈 Id del profe logueado desde el JWT
-
-        // 1️⃣ Crear query
-        var getCoursesByTeacherIdQuery = new GetCoursesByTeacherIdQuery(teacherId);
-
-        // 2️⃣ Ejecutar query
-        var courses = courseQueryService.handle(getCoursesByTeacherIdQuery);
-
-        // 3️⃣ Validar resultado
-        if (courses.isEmpty()) {
-            return ResponseEntity.ok(List.of()); // ← Devuelve lista vacía, no 404
-        }
-
-        // 4️⃣ Convertir a recurso
-        var coursesResponse = courses.stream()
-                .map(CourseResourceFromEntityAssembler::toResourceFromEntity)
-                .toList();
-
-        return ResponseEntity.ok(coursesResponse);
+    public ResponseEntity<List<CourseResource>> getCoursesByTeacherId(HttpServletRequest request) {
+        Long teacherId = getAuthenticatedUserId(request);
+        var query = new GetCoursesByTeacherIdQuery(teacherId);
+        var courses = courseQueryService.handle(query);
+        if (courses.isEmpty()) return ResponseEntity.ok(List.of());
+        var response = courses.stream().map(CourseResourceFromEntityAssembler::toResourceFromEntity).toList();
+        return ResponseEntity.ok(response);
     }
 
 

@@ -103,5 +103,10 @@ public class Course extends AuditableAbstractAggregateRoot<Course> {
         return new CourseJoinCode(key, expiration);
     }
 
+//    // Agregar este getter explícitamente
+//    public Long getId() {
+//        return super.getId();
+//    }
+
 
 }
