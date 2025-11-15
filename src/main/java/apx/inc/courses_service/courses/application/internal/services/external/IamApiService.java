@@ -18,7 +18,7 @@ public class IamApiService {
 
     private final RestTemplate restTemplate;
 
-    @Value("${services.iam.url:http://localhost:8081}")
+    @Value("${services.iam.url}")
     private String iamBaseUrl;
 
     public IamApiService(RestTemplate restTemplate) {
