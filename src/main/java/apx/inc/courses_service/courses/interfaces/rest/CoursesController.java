@@ -209,10 +209,12 @@ public class CoursesController {
         var courses = courseQueryService.handle(getAllCoursesQuery);
 
         if (courses.isEmpty()) {
-            ResponseEntity.ok(List.of());
+            return ResponseEntity.ok(List.of());
         }
 
-        var courseResponse = courses.stream().map(CourseResourceFromEntityAssembler::toResourceFromEntity).toList();
+        var courseResponse = courses.stream()
+                .map(CourseResourceFromEntityAssembler::toResourceFromEntity)
+                .toList();
         return ResponseEntity.ok(courseResponse);
     }
 
