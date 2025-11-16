@@ -13,7 +13,7 @@ public class AssignmentApiService {
 
     private final RestTemplate restTemplate;
 
-    @Value("${services.assignments.url:http://localhost:8083}")
+    @Value("${services.assignments.url}")
     private String assignmentsBaseUrl;
 
     public AssignmentApiService(RestTemplate restTemplate) {
